@@ -1,17 +1,16 @@
 #!/usr/bin/python3
 import hashlib
-import getpass
 from podcomm.definitions import *
 
 
 def main():
 
     while True:
-        pass1 = getpass.getpass("Enter new password (min. 8 characters): ")
+        pass1 = input("Enter new password (min. 8 characters): ")
         if pass1 is None or len(pass1) < 8:
             print("Password is less than 8 characters long")
             continue
-        pass2 = getpass.getpass("Repeat password: ")
+        pass2 = input("Repeat password: ")
         if pass2 != pass1:
             print("Passwords do not match!")
             continue
@@ -28,6 +27,8 @@ def main():
             getLogger().error("Error while creating and saving password: %s" % e)
             raise
     print("Password has been set.")
+    print("Restarting omnipy.service for changes to take effect")
+    os.system("sudo systemctl restart omnipy.service")
     return
 
 

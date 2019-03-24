@@ -1,12 +1,12 @@
 import re
-import logging
-import os
+import subprocess
 import struct
 import time
+from .packet_radio import PacketRadio, TxPower
 from .definitions import *
 from enum import IntEnum
 from threading import Event
-from .exceptions import RileyLinkError
+from .exceptions import PacketRadioError
 
 from bluepy.btle import Peripheral, Scanner, BTLEException
 
@@ -78,18 +78,31 @@ class Encoding(IntEnum):
     FOURBSIXB = 2
 
 
-class RileyLink:
-    def __init__(self, address = None):
+PA_LEVELS = [0x12,
+             0x0E, 0x0E,
+             0x1D, 0x1D,
+             0x34, 0x34, 0x34,
+             0x2C, 0x2C, 0x2C, 0x2C,
+             0x60, 0x60, 0x60, 0x60,
+             0x84, 0x84, 0x84, 0x84, 0x84,
+             0xC8, 0xC8, 0xC8, 0xC8, 0xC8,
+             0xC0, 0xC0]
+
+
+class RileyLink(PacketRadio):
+    def __init__(self):
         self.peripheral = None
+        self.pa_level_index = PA_LEVELS.index(0x84)
         self.data_handle = None
-        if address is None:
-            if os.path.exists(RILEYLINK_MAC_FILE):
-                with open(RILEYLINK_MAC_FILE, "r") as stream:
-                    address = stream.read()
-        self.address = address
+        self.logger = getLogger()
+        self.address = None
+        if os.path.exists(RILEYLINK_MAC_FILE):
+            with open(RILEYLINK_MAC_FILE, "r") as stream:
+                self.address = stream.read()
         self.service = None
         self.response_handle = None
         self.notify_event = Event()
+        self.initialized = False
 
     def connect(self, force_initialize=False):
         try:
@@ -122,7 +135,10 @@ class RileyLink:
             while self.peripheral.waitForNotifications(0.05):
                 self.peripheral.readCharacteristic(self.data_handle)
 
-            self.init_radio(force_initialize)
+            if self.initialized:
+                self.init_radio(force_initialize)
+            else:
+                self.init_radio(True)
         except BTLEException:
             if self.peripheral is not None:
                 self.disconnect()
@@ -131,9 +147,9 @@ class RileyLink:
     def disconnect(self, ignore_errors=True):
         try:
             if self.peripheral is None:
-                logging.info("Already disconnected")
+                self.logger.info("Already disconnected")
                 return
-            logging.info("Disconnecting..")
+            self.logger.info("Disconnecting..")
             if self.response_handle is not None:
                 response_notify_handle = self.response_handle + 1
                 notify_setup = b"\x00\x00"
@@ -146,9 +162,9 @@ class RileyLink:
                 if self.peripheral is not None:
                     self.peripheral.disconnect()
                     self.peripheral = None
-            except BTLEException as btlee:
+            except BTLEException:
                 if ignore_errors:
-                    logging.warning("Ignoring btle exception during disconnect: %s" % btlee)
+                    self.logger.exception("Ignoring btle exception during disconnect")
                 else:
                     raise
 
@@ -159,12 +175,12 @@ class RileyLink:
             bc = bs.getCharacteristics(XGATT_BATTERY_CHAR_UUID)[0]
             bch = bc.getHandle()
             battery_value = int(self.peripheral.readCharacteristic(bch)[0])
-            logging.debug("Battery level read: %d", battery_value)
+            self.logger.debug("Battery level read: %d", battery_value)
             version, v_major, v_minor = self._read_version()
             return { "battery_level": battery_value, "mac_address": self.address,
                     "version_string": version, "version_major": v_major, "version_minor": v_minor }
         except BTLEException as btlee:
-            raise RileyLinkError("Error communicating with RileyLink") from btlee
+            raise PacketRadioError("Error communicating with RileyLink") from btlee
         finally:
             self.disconnect()
 
@@ -178,13 +194,13 @@ class RileyLink:
                 response = self._command(Command.GET_VERSION)
                 if response is not None and len(response) > 0:
                     version = response.decode("ascii")
-                    logging.debug("RL reports version string: %s" % version)
+                    self.logger.debug("RL reports version string: %s" % version)
 
                     try:
                         with open(RILEYLINK_VERSION_FILE, "w") as stream:
                             stream.write(version)
                     except IOError:
-                        logging.exception("Failed to store version in file")
+                        self.logger.exception("Failed to store version in file")
 
             if version is None:
                 return "0.0", 0, 0
@@ -192,48 +208,48 @@ class RileyLink:
             try:
                 m = re.search(".+([0-9]+)\\.([0-9]+)", version)
                 if m is None:
-                    raise RileyLinkError("Failed to parse firmware version string: %s" % version)
+                    raise PacketRadioError("Failed to parse firmware version string: %s" % version)
 
                 v_major = int(m.group(1))
                 v_minor = int(m.group(2))
-                logging.debug("Interpreted version major: %d minor: %d" % (v_major, v_minor))
+                self.logger.debug("Interpreted version major: %d minor: %d" % (v_major, v_minor))
 
                 return version, v_major, v_minor
 
             except Exception as ex:
-                raise RileyLinkError("Failed to parse firmware version string: %s" % version) from ex
+                raise PacketRadioError("Failed to parse firmware version string: %s" % version) from ex
 
         except IOError:
-            logging.exception("Error reading version file")
-        except RileyLinkError:
+            self.logger.exception("Error reading version file")
+        except PacketRadioError:
             raise
 
         response = self._command(Command.GET_VERSION)
         if response is not None and len(response) > 0:
             version = response.decode("ascii")
-            logging.debug("RL reports version string: %s" % version)
+            self.logger.debug("RL reports version string: %s" % version)
             try:
                 m = re.search(".+([0-9]+)\\.([0-9]+)", version)
                 if m is None:
-                    raise RileyLinkError("Failed to parse firmware version string: %s" % version)
+                    raise PacketRadioError("Failed to parse firmware version string: %s" % version)
 
                 v_major = int(m.group(1))
                 v_minor = int(m.group(2))
-                logging.debug("Interpreted version major: %d minor: %d" % (v_major, v_minor))
+                self.logger.debug("Interpreted version major: %d minor: %d" % (v_major, v_minor))
 
                 return (version, v_major, v_minor)
-            except RileyLinkError:
+            except PacketRadioError:
                 raise
             except Exception as ex:
-                raise RileyLinkError("Failed to parse firmware version string: %s" % version) from ex
+                raise PacketRadioError("Failed to parse firmware version string: %s" % version) from ex
 
     def init_radio(self, force_init=False):
         try:
             version, v_major, v_minor = self._read_version()
 
             if v_major < 2:
-                logging.error("Firmware version is below 2.0")
-                raise RileyLinkError("Unsupported RileyLink firmware %d.%d (%s)" %
+                self.logger.error("Firmware version is below 2.0")
+                raise PacketRadioError("Unsupported RileyLink firmware %d.%d (%s)" %
                                         (v_major, v_minor, version))
 
             if not force_init:
@@ -266,31 +282,58 @@ class RileyLink:
             self._command(Command.UPDATE_REGISTER, bytes([Register.FSCAL2, 0x2A]))
             self._command(Command.UPDATE_REGISTER, bytes([Register.FSCAL1, 0x00]))
             self._command(Command.UPDATE_REGISTER, bytes([Register.FSCAL0, 0x1F]))
-            self._command(Command.UPDATE_REGISTER, bytes([Register.TEST1, 0x31]))
+            self._command(Command.UPDATE_REGISTER, bytes([Register.TEST1, 35]))
             self._command(Command.UPDATE_REGISTER, bytes([Register.TEST0, 0x09]))
-            self._command(Command.UPDATE_REGISTER, bytes([Register.PATABLE0, 0x84]))
+            self._command(Command.UPDATE_REGISTER, bytes([Register.PATABLE0, PA_LEVELS[self.pa_level_index]]))
+            self._command(Command.UPDATE_REGISTER, bytes([Register.FREND0, 0x00]))
             self._command(Command.UPDATE_REGISTER, bytes([Register.SYNC1, 0xA5]))
             self._command(Command.UPDATE_REGISTER, bytes([Register.SYNC0, 0x5A]))
 
             response = self._command(Command.GET_STATE)
             if response != b"OK":
-                raise RileyLinkError("Rileylink state is not OK. Response returned: %s" % response)
+                raise PacketRadioError("Rileylink state is not OK. Response returned: %s" % response)
 
-        except RileyLinkError as rle:
-            logging.error("Error while initializing rileylink radio: %s", rle)
+            self.initialized = True
+
+        except PacketRadioError as rle:
+            self.logger.error("Error while initializing rileylink radio: %s", rle)
             raise
+
+    def tx_up(self):
+        if self.pa_level_index < len(PA_LEVELS) - 1:
+            self.pa_level_index += 1
+            self._set_amp(self.pa_level_index)
+
+    def tx_down(self):
+        if self.pa_level_index > 0:
+            self.pa_level_index -= 1
+            self._set_amp(self.pa_level_index)
+
+    def set_tx_power(self, tx_power):
+        if tx_power is None:
+            return
+        elif tx_power == TxPower.Lowest:
+            self._set_amp(0)
+        elif tx_power == TxPower.Low:
+            self._set_amp(PA_LEVELS.index(0x12))
+        elif tx_power == TxPower.Normal:
+            self._set_amp(PA_LEVELS.index(0x60))
+        elif tx_power == TxPower.High:
+            self._set_amp(PA_LEVELS.index(0xC8))
+        elif tx_power == TxPower.Highest:
+            self._set_amp(PA_LEVELS.index(0xC0))
 
     def get_packet(self, timeout=5.0):
         try:
             self.connect()
-            return self._command(Command.GET_PACKET, struct.pack(">BL", 0, int(timeout * 1000)), timeout=float(timeout)+0.5)
-        except RileyLinkError as rle:
-            logging.error("Error while receiving data: %s", rle)
+            return self._command(Command.GET_PACKET, struct.pack(">BL", 0, int(timeout * 1000)),
+                                 timeout=float(timeout)+0.5)
+        except PacketRadioError as rle:
+            self.logger.error("Error while receiving data: %s", rle)
             raise
 
     def send_and_receive_packet(self, packet, repeat_count, delay_ms, timeout_ms, retry_count, preamble_ext_ms):
 
-        logging.debug("sending packet: %s" % packet.hex())
         try:
             self.connect()
             return self._command(Command.SEND_AND_LISTEN,
@@ -304,8 +347,8 @@ class RileyLink:
                                               preamble_ext_ms)
                                               + packet,
                                   timeout=30)
-        except RileyLinkError as rle:
-            logging.error("Error while sending and receiving data: %s", rle)
+        except PacketRadioError as rle:
+            self.logger.error("Error while sending and receiving data: %s", rle)
             raise
 
     def send_packet(self, packet, repeat_count, delay_ms, preamble_extension_ms):
@@ -315,69 +358,94 @@ class RileyLink:
                                                                    preamble_extension_ms) + packet,
                                   timeout=30)
             return result
-        except RileyLinkError as rle:
-            logging.error("Error while sending data: %s", rle)
+        except PacketRadioError as rle:
+            self.logger.error("Error while sending data: %s", rle)
             raise
+
+    def _set_amp(self, index=None):
+        try:
+            self.connect()
+            if index is not None:
+                self.pa_level_index = index
+            self._command(Command.UPDATE_REGISTER, bytes([Register.PATABLE0, PA_LEVELS[self.pa_level_index]]))
+            self.logger.debug("Setting pa level to index %d of %d" % (self.pa_level_index, len(PA_LEVELS)))
+        except PacketRadioError:
+            self.logger.exception("Error while setting tx amplification")
+            raise
+
 
     def _findRileyLink(self):
         scanner = Scanner()
         found = None
-        logging.debug("Scanning for RileyLink")
+        self.logger.debug("Scanning for RileyLink")
         retries = 10
         while found is None and retries > 0:
             retries -= 1
             for result in scanner.scan(1.0):
                 if result.getValueText(7) == RILEYLINK_SERVICE_UUID:
-                    logging.debug("Found RileyLink")
+                    self.logger.debug("Found RileyLink")
                     found = result.addr
                     try:
                         with open(RILEYLINK_MAC_FILE, "w") as stream:
                             stream.write(result.addr)
                     except IOError:
-                        logging.warning("Cannot store rileylink mac address for later")
+                        self.logger.warning("Cannot store rileylink mac radio_address for later")
                     break
 
         if found is None:
-            raise RileyLinkError("Could not find RileyLink")
+            raise PacketRadioError("Could not find RileyLink")
 
         return found
 
     def _connect_retry(self, retries):
         while retries > 0:
             retries -= 1
-            logging.info("Connecting to RileyLink, retries left: %d" % retries)
+            self.logger.info("Connecting to RileyLink, retries left: %d" % retries)
+
             try:
                 self.peripheral.connect(self.address)
-                logging.info("Connected")
+                self.logger.info("Connected")
                 break
             except BTLEException as btlee:
-                logging.warning("BTLE exception trying to connect: %s" % btlee)
-                time.sleep(2)
+                self.logger.warning("BTLE exception trying to connect: %s" % btlee)
+                try:
+                    p = subprocess.Popen(["ps", "-A"], stdout=subprocess.PIPE)
+                    out, err = p.communicate()
+                    for line in out.splitlines():
+                        if "bluepy-helper" in line:
+                            pid = int(line.split(None, 1)[0])
+                            os.kill(pid, 9)
+                            break
+                except:
+                    self.logger.warning("Failed to kill bluepy-helper")
+                time.sleep(1)
 
     def _command(self, command_type, command_data=None, timeout=10.0):
-        if command_data is None:
-            data = bytes([1, command_type])
-        else:
-            data = bytes([len(command_data) + 1, command_type]) + command_data
-
-        self.peripheral.writeCharacteristic(self.data_handle, data, withResponse=True)
-
-        if not self.peripheral.waitForNotifications(timeout):
-            raise RileyLinkError("Timed out while waiting for a response from RileyLink")
-
-        response = self.peripheral.readCharacteristic(self.data_handle)
-
-        if response is None or len(response) == 0:
-            raise RileyLinkError("RileyLink returned no response")
-        else:
-            if response[0] == Response.COMMAND_SUCCESS:
-                return response[1:]
-            elif response[0] == Response.COMMAND_INTERRUPTED:
-                logging.warning("A previous command was interrupted")
-                return response[1:]
-            elif response[0] == Response.RX_TIMEOUT:
-                return None
+        try:
+            if command_data is None:
+                data = bytes([1, command_type])
             else:
-                raise RileyLinkError("RileyLink returned error code: %02X. Additional response data: %s"
-                                     % (response[0], response[1:]), response[0])
+                data = bytes([len(command_data) + 1, command_type]) + command_data
 
+            self.peripheral.writeCharacteristic(self.data_handle, data, withResponse=True)
+
+            if not self.peripheral.waitForNotifications(timeout):
+                raise PacketRadioError("Timed out while waiting for a response from RileyLink")
+
+            response = self.peripheral.readCharacteristic(self.data_handle)
+
+            if response is None or len(response) == 0:
+                raise PacketRadioError("RileyLink returned no response")
+            else:
+                if response[0] == Response.COMMAND_SUCCESS:
+                    return response[1:]
+                elif response[0] == Response.COMMAND_INTERRUPTED:
+                    self.logger.warning("A previous command was interrupted")
+                    return response[1:]
+                elif response[0] == Response.RX_TIMEOUT:
+                    return None
+                else:
+                    raise PacketRadioError("RileyLink returned error code: %02X. Additional response data: %s"
+                                         % (response[0], response[1:]), response[0])
+        except Exception as e:
+            raise PacketRadioError("Error executing command") from e

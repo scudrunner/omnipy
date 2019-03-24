@@ -20,7 +20,7 @@ def get_auth_params():
 
     r = requests.get(ROOT_URL + REST_URL_TOKEN, timeout=20)
     j = json.loads(r.text)
-    token = base64.b64decode(j["result"]["token"])
+    token = base64.b64decode(j["response"]["token"])
 
     i = os.urandom(16)
     cipher = AES.new(key, AES.MODE_CBC, i)
@@ -41,9 +41,12 @@ def read_pdm_address(args, pa):
 
 
 def new_pod(args, pa):
-    pa["lot"] = args.lot
-    pa["tid"] = args.tid
-    pa["address"] = args.address
+    pa["id_lot"] = args.id_lot
+    pa["id_t"] = args.id_t
+    if str(args.radio_address).lower().startswith("0x"):
+        pa["radio_address"] = int(args.radio_address[2:], 16)
+    else:
+        pa["radio_address"] = int(args.radio_address)
     call_api(args.url, REST_URL_NEW_POD, pa)
 
 
@@ -74,6 +77,14 @@ def deactivate(args, pa):
     call_api(args.url, REST_URL_DEACTIVATE_POD, pa)
 
 
+def shutdown(args, pa):
+    call_api(args.url, REST_URL_OMNIPY_SHUTDOWN, pa)
+
+
+def restart(args, pa):
+    call_api(args.url, REST_URL_OMNIPY_RESTART, pa)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Send a command to omnipy API")
     parser.add_argument("-u", "--url", type=str, default="http://127.0.0.1:4444", required=False)
@@ -84,9 +95,9 @@ def main():
     subparser.set_defaults(func=read_pdm_address)
 
     subparser = subparsers.add_parser("newpod", help="newpod -h")
-    subparser.add_argument("lot", type=int, help="Lot number of the pod")
-    subparser.add_argument("tid", type=int, help="Serial number of the pod")
-    subparser.add_argument("address", type=int, help="Radio address of the pod")
+    subparser.add_argument("id_lot", type=int, help="Lot number of the pod")
+    subparser.add_argument("id_t", type=int, help="Serial number of the pod")
+    subparser.add_argument("radio_address", help="Radio radio_address of the pod")
     subparser.set_defaults(func=new_pod)
 
     subparser = subparsers.add_parser("status", help="status -h")
@@ -109,6 +120,12 @@ def main():
 
     subparser = subparsers.add_parser("deactivate", help="deactivate -h")
     subparser.set_defaults(func=deactivate)
+
+    subparser = subparsers.add_parser("shutdown", help="shutdown -h")
+    subparser.set_defaults(func=shutdown)
+
+    subparser = subparsers.add_parser("restart", help="restart -h")
+    subparser.set_defaults(func=restart)
 
     args = parser.parse_args()
     pa = get_auth_params()

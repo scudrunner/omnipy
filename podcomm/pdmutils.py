@@ -1,14 +1,21 @@
 from decimal import *
 from .exceptions import PdmError, PdmBusyError
-from .definitions import *
 import struct
+from threading import RLock
 
+g_lock = RLock()
 
-def pdmlock():
-    try:
-        return open(PDM_LOCK_FILE, "w")
-    except IOError as ioe:
-        raise PdmBusyError from ioe
+class PdmLock():
+    def __init__(self, timeout=2):
+        self.fd = None
+        self.timeout = timeout
+
+    def __enter__(self):
+        if not g_lock.acquire(blocking=True, timeout=self.timeout):
+            raise PdmBusyError()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        g_lock.release()
 
 def getPulsesForHalfHours(halfHourUnits):
     halfHourlyDeliverySubtotals = []

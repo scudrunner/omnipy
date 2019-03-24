@@ -4,7 +4,7 @@ class OmnipyError(Exception):
         self.error_message = message
 
 
-class RileyLinkError(OmnipyError):
+class PacketRadioError(OmnipyError):
     def __init__(self, message="Unknown RL error", err_code=None):
         OmnipyError.__init__(self, message)
         self.err_code = err_code
@@ -13,11 +13,6 @@ class RileyLinkError(OmnipyError):
 class ProtocolError(OmnipyError):
     def __init__(self, message="Unknown protocol error"):
         OmnipyError.__init__(self, message)
-
-
-class TransmissionOutOfSyncError(ProtocolError):
-    def __init__(self, message="Transmission out of sync error"):
-        ProtocolError.__init__(self, message)
 
 
 class PdmError(OmnipyError):

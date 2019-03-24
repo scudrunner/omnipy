@@ -1,13 +1,15 @@
 from enum import IntEnum
+import os
 import logging
-import sys
+from logging.handlers import MemoryHandler
 
-RILEYLINK_MAC_FILE = "data/rladdr"
-RILEYLINK_VERSION_FILE = "data/rlversion"
-PDM_LOCK_FILE = "data/.pdmlock"
-TOKENS_FILE = "data/tokens"
+TMPFS_USER = "/run/user/" + str(os.getuid())
+TMPFS_ROOT = TMPFS_USER + "/omnipy"
+RILEYLINK_MAC_FILE = TMPFS_ROOT + "/rladdr"
+RILEYLINK_VERSION_FILE = TMPFS_ROOT + "/rlversion"
 KEY_FILE = "data/key"
 RESPONSE_FILE = "data/response"
+LAST_ACTIVATED_FILE = "data/lastactivated"
 POD_FILE = "data/pod"
 POD_FILE_SUFFIX = ".json"
 POD_LOG_SUFFIX = ".log"
@@ -15,9 +17,9 @@ OMNIPY_LOGGER = "OMNIPY"
 OMNIPY_LOGFILE = "data/omnipy.log"
 
 API_VERSION_MAJOR = 1
-API_VERSION_MINOR = 0
+API_VERSION_MINOR = 2
 
-REST_URL_GET_VERSION = "/omnipy/version"
+REST_URL_PING = "/omnipy/ping"
 REST_URL_OMNIPY_SHUTDOWN = "/omnipy/shutdown"
 REST_URL_OMNIPY_RESTART = "/omnipy/restart"
 
@@ -27,10 +29,11 @@ REST_URL_CHECK_PASSWORD = "/omnipy/pwcheck"
 REST_URL_NEW_POD = "/omnipy/newpod"
 REST_URL_SET_POD_PARAMETERS = "/omnipy/parameters"
 REST_URL_GET_PDM_ADDRESS = "/omnipy/pdmspy"
-REST_URL_SET_LIMITS = "/omnipy/limits"
 
 REST_URL_RL_INFO = "/rl/info"
 
+REST_URL_ACTIVATE_POD = "/pdm/activate"
+REST_URL_START_POD = "/pdm/start"
 REST_URL_STATUS = "/pdm/status"
 REST_URL_PDM_BUSY = "/pdm/isbusy"
 REST_URL_ACK_ALERTS = "/pdm/ack"
@@ -39,25 +42,39 @@ REST_URL_BOLUS = "/pdm/bolus"
 REST_URL_CANCEL_BOLUS = "/pdm/cancelbolus"
 REST_URL_SET_TEMP_BASAL = "/pdm/settempbasal"
 REST_URL_CANCEL_TEMP_BASAL = "/pdm/canceltempbasal"
+REST_URL_SET_BASAL_SCHEDULE = "/pdm/setbasalschedule"
+
+logger = None
 
 
 def getLogger():
-    return logging.getLogger(OMNIPY_LOGGER)
+    global logger
+
+    if logger is None:
+        logger = logging.getLogger(OMNIPY_LOGGER)
+        logger.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+        fh = logging.FileHandler(OMNIPY_LOGFILE)
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(formatter)
+
+        mh = MemoryHandler(capacity=256*1024, target=fh)
+        logger.addHandler(mh)
+
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+    return logger
 
 
 def configureLogging():
-    logger = getLogger()
-    logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh = logging.FileHandler(OMNIPY_LOGFILE)
-    ch = logging.StreamHandler()
-    fh.setLevel(logging.DEBUG)
-    ch.setLevel(logging.INFO)
-    fh.setFormatter(formatter)
-    ch.setFormatter(formatter)
-    logger.addHandler(fh)
-    logger.addHandler(ch)
+    pass
 
+class RequestType(IntEnum):
+    pass
 
 class BolusState(IntEnum):
     NotRunning = 0
@@ -78,8 +95,8 @@ class PodProgress(IntEnum):
     PairingSuccess = 3
     Purging = 4
     ReadyForInjection = 5
-    InjectionDone = 6
-    Priming = 7
+    BasalScheduleSet = 6
+    Inserting = 7
     Running = 8
     RunningLow = 9
     ErrorShuttingDown = 13
