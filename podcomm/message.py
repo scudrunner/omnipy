@@ -1,7 +1,7 @@
 from .packet import Packet
 from .exceptions import ProtocolError
 from enum import Enum
-from .crc import crc16
+from .crc import crc16, crc8
 import struct
 
 class MessageState(Enum):
@@ -14,7 +14,7 @@ class MessageType(Enum):
     POD = 1
 
 class Message:
-    def __init__(self, mtype, address, unknownBits = 0, sequence = 0):
+    def __init__(self, mtype, address, unknownBits=0, sequence=0):
         self.type = mtype
         self.address = address
         self.unknownBits = unknownBits
@@ -49,14 +49,15 @@ class Message:
         else:
             raise ProtocolError("Packet type %s not valid for a first packet in a message" % packet.type)
 
-        b0 = packet.body[0]
-        b1 = packet.body[1]
+        msg_addr = struct.unpack(">I", packet.body[0:4])[0]
+        b0 = packet.body[4]
+        b1 = packet.body[5]
         unknownBits = b0 >> 6
         sequence = (b0 & 0x3C) >> 2
 
-        m = Message(mType, packet.address, unknownBits, sequence)
+        m = Message(mType, msg_addr, unknownBits, sequence)
         m.length = ((b0 & 3) <<8) | b1
-        m.body = packet.body[2:]
+        m.body = packet.body[6:]
         m.updateMessageState()
         m.acknowledged = False
         return m

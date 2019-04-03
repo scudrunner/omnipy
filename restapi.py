@@ -1,9 +1,10 @@
 #!/usr/bin/python3
+from threading import Thread
+import signal
 import base64
 from uuid import getnode as get_mac
-import os
 from decimal import *
-
+from threading import Lock
 from Crypto.Cipher import AES
 import simplejson as json
 from flask import Flask, request, send_from_directory
@@ -13,7 +14,7 @@ from podcomm.crc import crc8
 from podcomm.packet import Packet
 from podcomm.pdm import Pdm
 from podcomm.pod import Pod
-from podcomm.rileylink import RileyLink
+from podcomm.pr_rileylink import RileyLink
 from podcomm.definitions import *
 
 
@@ -21,6 +22,8 @@ g_key = None
 g_pod = None
 g_pdm = None
 g_deny = False
+g_tokens = []
+g_token_lock = Lock()
 
 app = Flask(__name__, static_url_path="/")
 configureLogging()
@@ -105,11 +108,17 @@ def save_activated_pod_address(addr):
         logger.exception("Error while storing activated radio address")
 
 def create_response(success, response, pod_status=None):
-    if pod_status is not None and pod_status.__class__ != dict:
+
+    if pod_status is None:
+        pod_status = {}
+    elif pod_status.__class__ != dict:
         pod_status = pod_status.__dict__
 
-    if response is not None and response.__class__ != dict:
+    if response is None:
+        response = {}
+    elif response.__class__ != dict:
         response = response.__dict__
+
     return json.dumps({"success": success,
                        "response": response,
                        "status": pod_status,
@@ -135,30 +144,11 @@ def verify_auth(request_obj):
         cipher = AES.new(g_key, AES.MODE_CBC, iv)
         token = cipher.decrypt(auth)
 
-        with open(TOKENS_FILE, "a+b") as tokens:
-            tokens.seek(0, 0)
-            found = False
-            while True:
-                read_token = tokens.read(16)
-                if len(read_token) < 16:
-                    break
-                if read_token == token:
-                    found = True
-                    break
-
-            if found:
-                while True:
-                    read_token = tokens.read(16)
-                    if len(read_token) < 16:
-                        tokens.seek(-16 - len(read_token), 1)
-                        break
-                    tokens.seek(-32, 1)
-                    tokens.write(read_token)
-                    tokens.seek(16, 1)
-                tokens.truncate()
-
-        if not found:
-            raise RestApiException("Invalid authentication token")
+        with g_token_lock:
+            if token in g_tokens:
+                g_tokens.remove(token)
+            else:
+                raise RestApiException("Invalid authentication token")
     except RestApiException:
         logger.exception("Authentication error")
         raise
@@ -185,8 +175,11 @@ def send_content(path):
 
 def _api_result(result_lambda, generic_err_message):
     try:
+        if g_deny:
+            raise RestApiException("Pdm is shutting down")
+
         return create_response(True,
-                               response=result_lambda())
+                               response=result_lambda(), pod_status=get_pod())
     except RestApiException as rae:
         return create_response(False, rae)
     except Exception as e:
@@ -199,9 +192,9 @@ def ping():
 
 
 def create_token():
-    with open(TOKENS_FILE, "a+b") as tokens:
-        token = bytes(os.urandom(16))
-        tokens.write(token)
+    token = bytes(os.urandom(16))
+    with g_token_lock:
+        g_tokens.append(token)
     return {"token": base64.b64encode(token)}
 
 
@@ -234,7 +227,7 @@ def get_pdm_address():
         if p is None:
             raise RestApiException("No pdm packet detected")
 
-        return {"radio_address": p.address}
+        return {"radio_address": p.address, "radio_address_hex": "%8X" % p.address}
     finally:
         r.disconnect(ignore_errors=True)
 
@@ -253,27 +246,35 @@ def new_pod():
 
     archive_pod()
     pod.Save(POD_FILE + POD_FILE_SUFFIX)
-    return pod
 
 def activate_pod():
     verify_auth(request)
 
     pod = Pod()
     archive_pod()
-    pod.radio_address_candidate = get_next_pod_address()
     pod.Save(POD_FILE + POD_FILE_SUFFIX)
 
     pdm = get_pdm()
-    pdm.activate_pod()
+
+    pdm.activate_pod(get_next_pod_address())
     save_activated_pod_address(pod.radio_address)
-    return pod
 
 def start_pod():
     verify_auth(request)
 
     pdm = get_pdm()
-    pdm.inject_and_start()
-    return pdm.pod
+
+    schedule=[]
+
+    for i in range(0,48):
+        rate = Decimal(request.args.get("h"+str(i)))
+        schedule.append(rate)
+
+    hours = int(request.args.get("hours"))
+    minutes = int(request.args.get("minutes"))
+    seconds = int(request.args.get("seconds"))
+
+    pdm.inject_and_start(schedule, hours, minutes, seconds)
 
 def _int_parameter(obj, parameter):
     if request.args.get(parameter) is not None:
@@ -303,33 +304,35 @@ def set_pod_parameters():
     verify_auth(request)
 
     pod = get_pod()
-    reset_nonce = False
-    if _int_parameter(pod, "id_lot"):
-        reset_nonce = True
-    if _int_parameter(pod, "id_t"):
-        reset_nonce = True
+    try:
+        reset_nonce = False
+        if _int_parameter(pod, "id_lot"):
+            reset_nonce = True
+        if _int_parameter(pod, "id_t"):
+            reset_nonce = True
 
-    if reset_nonce:
-        pod.nonce_last = None
-        pod.nonce_seed = 0
+        if reset_nonce:
+            pod.nonce_last = None
+            pod.nonce_seed = 0
 
-    if _int_parameter(pod, "radio_address"):
-        pod.radio_packet_sequence = 0
-        pod.radio_message_sequence = 0
+        if _int_parameter(pod, "radio_address"):
+            pod.radio_packet_sequence = 0
+            pod.radio_message_sequence = 0
 
-    _float_parameter(pod, "var_utc_offset")
-    _float_parameter(pod, "var_maximum_bolus")
-    _float_parameter(pod, "var_maximum_temp_basal_rate")
-    _float_parameter(pod, "var_alert_low_reservoir")
-    _int_parameter(pod, "var_alert_replace_pod")
-    _bool_parameter(pod, "var_notify_bolus_start")
-    _bool_parameter(pod, "var_notify_bolus_cancel")
-    _bool_parameter(pod, "var_notify_temp_basal_set")
-    _bool_parameter(pod, "var_notify_temp_basal_cancel")
-    _bool_parameter(pod, "var_notify_basal_schedule_change")
-
-    pod.Save()
-    return None
+        _float_parameter(pod, "var_utc_offset")
+        _float_parameter(pod, "var_maximum_bolus")
+        _float_parameter(pod, "var_maximum_temp_basal_rate")
+        _float_parameter(pod, "var_alert_low_reservoir")
+        _int_parameter(pod, "var_alert_replace_pod")
+        _bool_parameter(pod, "var_notify_bolus_start")
+        _bool_parameter(pod, "var_notify_bolus_cancel")
+        _bool_parameter(pod, "var_notify_temp_basal_set")
+        _bool_parameter(pod, "var_notify_temp_basal_cancel")
+        _bool_parameter(pod, "var_notify_basal_schedule_change")
+    except:
+        raise
+    finally:
+        pod.Save()
 
 
 def get_rl_info():
@@ -347,14 +350,12 @@ def get_status():
 
     pdm = get_pdm()
     pdm.updatePodStatus(req_type)
-    return pdm.pod
 
 def deactivate_pod():
     verify_auth(request)
     pdm = get_pdm()
     pdm.deactivate_pod()
     archive_pod()
-    return pdm.pod
 
 def bolus():
     verify_auth(request)
@@ -362,14 +363,12 @@ def bolus():
     pdm = get_pdm()
     amount = Decimal(request.args.get('amount'))
     pdm.bolus(amount)
-    return pdm.pod
 
 def cancel_bolus():
     verify_auth(request)
 
     pdm = get_pdm()
     pdm.cancelBolus()
-    return pdm.pod
 
 def set_temp_basal():
     verify_auth(request)
@@ -378,14 +377,27 @@ def set_temp_basal():
     amount = Decimal(request.args.get('amount'))
     hours = Decimal(request.args.get('hours'))
     pdm.setTempBasal(amount, hours, False)
-    return pdm.pod
 
 def cancel_temp_basal():
     verify_auth(request)
 
     pdm = get_pdm()
     pdm.cancelTempBasal()
-    return pdm.pod
+
+def set_basal_schedule():
+    verify_auth(request)
+    pdm = get_pdm()
+
+    schedule=[]
+
+    for i in range(0,48):
+        rate = Decimal(request.args.get("h"+str(i)))
+        schedule.append(rate)
+
+    hours = int(request.args.get("hours"))
+    minutes = int(request.args.get("minutes"))
+    seconds = int(request.args.get("seconds"))
+    pdm.set_basal_schedule(schedule, hours, minutes, seconds)
 
 def is_pdm_busy():
     pdm = get_pdm()
@@ -397,7 +409,6 @@ def acknowledge_alerts():
     mask = Decimal(request.args.get('alertmask'))
     pdm = get_pdm()
     pdm.acknowledge_alerts(mask)
-    return pdm.pod
 
 def shutdown():
     global g_deny
@@ -408,7 +419,7 @@ def shutdown():
     pdm = get_pdm()
     while pdm.is_busy():
         time.sleep(1)
-    os.system("sudo shutdown -h -t 7s")
+    os.system("sudo shutdown -h")
     return {"shutdown": time.time()}
 
 def restart():
@@ -420,8 +431,8 @@ def restart():
     pdm = get_pdm()
     while pdm.is_busy():
         time.sleep(1)
-    os.system("sudo shutdown -r -t 7s")
-    return {"shutdown": time.time()}
+    os.system("sudo shutdown -r")
+    return {"restart": time.time()}
 
 @app.route(REST_URL_PING)
 def a00():
@@ -492,40 +503,60 @@ def a16():
     return _api_result(lambda: restart(), "Failure while executing reboot")
 
 @app.route(REST_URL_ACTIVATE_POD)
-def a04():
-    return _api_result(lambda: new_pod(), "Failure while activating a new pod")
+def a17():
+    return _api_result(lambda: activate_pod(), "Failure while activating a new pod")
 
 @app.route(REST_URL_START_POD)
-def a04():
-    return _api_result(lambda: new_pod(), "Failure while starting a newly activated pod")
+def a18():
+    return _api_result(lambda: start_pod(), "Failure while starting a newly activated pod")
 
+@app.route(REST_URL_SET_BASAL_SCHEDULE)
+def a19():
+    return _api_result(lambda: set_basal_schedule(), "Failure while setting a basal schedule")
+
+def run_flask():
+    try:
+        app.run(host='0.0.0.0', port=4444, debug=True, use_reloader=False)
+    except:
+        logger.exception("Error while running rest api, exiting")
+
+def exit_with_grace():
+    try:
+        global g_deny
+        g_deny = True
+        pdm = get_pdm()
+        while pdm.is_busy():
+            time.sleep(1)
+    except:
+        logger.exception("error during graceful shutdown")
+
+    exit(0)
 
 if __name__ == '__main__':
-    try:
-        logger.info("Rest api is starting")
-        if not os.path.isdir(TMPFS_ROOT):
-            os.mkdir(TMPFS_ROOT)
-        if os.path.isfile(TOKENS_FILE):
-            logger.debug("removing tokens from previous session")
-            os.remove(TOKENS_FILE)
-        if os.path.isfile(RESPONSE_FILE):
-            logger.debug("removing response queue from previous session")
-            os.remove(RESPONSE_FILE)
+    logger.info("Rest api is starting")
 
+    try:
         with open(KEY_FILE, "rb") as keyfile:
             g_key = keyfile.read(32)
-
-    except IOError as ioe:
-        logger.warning("Error while removing stale files: %s", exc_info=ioe)
+    except IOError:
+        logger.exception("Error while reading keyfile. Did you forget to set a password?")
+        raise
 
     try:
-        os.system("sudo systemctl restart systemd-timesyncd")
-        os.system("sudo systemctl daemon-reload")
+        os.system("sudo systemctl restart systemd-timesyncd && sudo systemctl daemon-reload")
     except:
         logger.exception("Error while reloading timesync daemon")
 
+    signal.signal(signal.SIGTERM, exit_with_grace)
+
+    t = Thread(target=run_flask)
+    t.setDaemon(True)
+    t.start()
+
     try:
-        app.run(host='0.0.0.0', port=4444)
-    except:
-        logger.exception("Error while running rest api, exiting")
-        raise
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        exit_with_grace()
+

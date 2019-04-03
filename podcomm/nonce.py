@@ -18,6 +18,7 @@ class Nonce:
 
     def getNext(self, seeking = False):
         if not seeking and self.nonce_runs > 15:
+            self.lastNonce = FAKE_NONCE
             return FAKE_NONCE
         nonce = self.table[self.ptr]
         self.table[self.ptr] = self._generate()
@@ -25,6 +26,9 @@ class Nonce:
         self.lastNonce = nonce
         self.nonce_runs += 1
         return nonce
+
+    def reset(self):
+        self.nonce_runs = 255
 
     def sync(self, syncWord, msgSequence):
         w_sum = (self.lastNonce & 0xFFFF) + (crc16_table[msgSequence] & 0xFFFF) \

@@ -1,14 +1,21 @@
 from decimal import *
 from .exceptions import PdmError, PdmBusyError
-from .definitions import *
 import struct
+from threading import RLock
 
+g_lock = RLock()
 
-def pdmlock():
-    try:
-        return open(PDM_LOCK_FILE, "w")
-    except IOError as ioe:
-        raise PdmBusyError from ioe
+class PdmLock():
+    def __init__(self, timeout=2):
+        self.fd = None
+        self.timeout = timeout
+
+    def __enter__(self):
+        if not g_lock.acquire(blocking=True, timeout=self.timeout):
+            raise PdmBusyError()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        g_lock.release()
 
 def getPulsesForHalfHours(halfHourUnits):
     halfHourlyDeliverySubtotals = []
@@ -97,6 +104,7 @@ def getHalfHourPulseInterval(pulseCount):
 
 def getPulseIntervalEntries(halfHourUnits):
     list1 = []
+    index = 0
     for hhu in halfHourUnits:
         pulses10 = hhu * Decimal("200")
         interval = 1800000000
@@ -108,28 +116,34 @@ def getPulseIntervalEntries(halfHourUnits):
         elif interval > 1800000000:
             raise PdmError()
 
-        list1.append((int(pulses10), int(interval)))
+        list1.append((int(pulses10), int(interval), index))
+        index += 1
 
     list2 = []
-    lastPulseInterval = -1
+    lastPulseInterval = None
     subTotalPulses = 0
+    hh_indices = []
 
-    for pulses, interval in list1:
-        if lastPulseInterval == -1:
+    for pulses, interval, index in list1:
+        if lastPulseInterval is None:
             subTotalPulses = pulses
             lastPulseInterval = interval
+            hh_indices.append(index)
         elif lastPulseInterval == interval:
             if subTotalPulses + pulses < 65536 and subTotalPulses > 0:
                 subTotalPulses += pulses
+                hh_indices.append(index)
             else:
-                list2.append((subTotalPulses, lastPulseInterval))
+                list2.append((subTotalPulses, lastPulseInterval, hh_indices))
                 subTotalPulses = pulses
+                hh_indices = [index]
         else:
-            list2.append((subTotalPulses, lastPulseInterval))
+            list2.append((subTotalPulses, lastPulseInterval, hh_indices))
             subTotalPulses = pulses
             lastPulseInterval = interval
+            hh_indices = [index]
     else:
         if lastPulseInterval >= 0:
-            list2.append((subTotalPulses, lastPulseInterval))
+            list2.append((subTotalPulses, lastPulseInterval, hh_indices))
 
     return list2

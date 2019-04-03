@@ -2,8 +2,9 @@ from .pdmutils import *
 from .nonce import *
 from .radio import Radio
 from .message import Message, MessageType
-from .exceptions import PdmError, OmnipyError, TransmissionOutOfSyncError
+from .exceptions import PdmError, OmnipyError
 from .definitions import *
+from .packet_radio import TxPower
 
 from decimal import *
 import time
@@ -45,12 +46,11 @@ class Pdm:
 
     @staticmethod
     def customMessage(message_parts, with_nonce=False, lot=None, tid=None,
-                      addr=0xFFFFFFFF, addr2=None, nonce_seek=None, nonce_seed=None,
-                      radio_message_sequence=0, radio_packet_sequence=0, low_tx=False,
-                      high_tx=False, unknown_bits=0, radio=None, stay_connected=False):
+                      addr=0xFFFFFFFF, addr2=0xFFFFFFFF, nonce_seek=None, nonce_seed=None,
+                      radio_message_sequence=0, radio_packet_sequence=0, tx_power=None, unknown_bits=0, radio=None):
         if radio is None:
-            radio = Radio(radio_message_sequence, radio_packet_sequence, debug_mode=True)
-        message = Message(MessageType.PDM, addr, sequence=radio_message_sequence)
+            radio = Radio(radio_message_sequence, radio_packet_sequence)
+        message = Message(MessageType.PDM, addr, addr2, sequence=radio_message_sequence)
         for command, body in message_parts:
             message.addCommand(command, body)
 
@@ -61,8 +61,7 @@ class Pdm:
             nonce = nonce_obj.getNext()
             message.setNonce(nonce)
         try:
-            response_message = radio.send_request_get_response(message, address2=addr2, low_tx=low_tx, high_tx=high_tx,
-                                                               stay_connected=stay_connected)
+            response_message = radio.send_request_get_response(message, tx_power=tx_power)
 
             contents = response_message.getContents()
             for (ctype, content) in contents:
@@ -74,50 +73,32 @@ class Pdm:
                     return Pdm.customMessage(message_parts, with_nonce=with_nonce, lot=lot, tid=tid,
                                 addr=addr, addr2=addr2, nonce_seek=nonce_seek, nonce_seed=nonce_seed,
                                 radio_message_sequence=message.sequence, radio_packet_sequence=radio_packet_sequence,
-                                             low_tx=low_tx, high_tx=high_tx, stay_connected=stay_connected)
+                                             tx_power=tx_power)
 
             return response_message
-        except TransmissionOutOfSyncError:
-            radio.disconnect()
-            parts = []
-            parts.append((0x0e, bytes([0x00])))
-            Pdm.customMessage(parts, with_nonce=False, lot=lot, tid=tid,
-                                     addr=addr, addr2=addr2, nonce_seek=nonce_seek, nonce_seed=nonce_seed,
-                                     radio_message_sequence=message.sequence,
-                                     radio_packet_sequence=radio_packet_sequence,
-                                     low_tx=low_tx, high_tx=high_tx)
         except:
             getLogger().exception("Error while custom message")
             raise
-        finally:
-            if not stay_connected:
-                radio.disconnect()
-
 
     def updatePodStatus(self, update_type=0):
         try:
             self._assert_pod_address_assigned()
-            if update_type == 0 and \
-                    self.pod.state_last_updated is not None and \
-                    time.time() - self.pod.state_last_updated < 60:
-                return
-            with pdmlock():
+            with PdmLock():
                 self.logger.debug("updating pod status")
-                self._update_status(update_type, stay_connected=False)
+                self._update_status(update_type)
 
         except OmnipyError:
             raise
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
     def acknowledge_alerts(self, alert_mask):
         try:
             self._assert_can_acknowledge_alerts()
 
-            with pdmlock():
+            with PdmLock():
                 self.logger.debug("acknowledging alerts with bitmask %d" % alert_mask)
                 self._acknowledge_alerts(alert_mask)
 
@@ -126,12 +107,11 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
     def is_busy(self):
         try:
-            with pdmlock():
+            with PdmLock(0):
                 return self._is_bolus_running()
         except PdmBusyError:
             return True
@@ -139,12 +119,11 @@ class Pdm:
             raise
         except Exception as e:
             raise PdmError("Unexpected error") from e
-        finally:
-            self.get_radio().disconnect()
 
     def bolus(self, bolus_amount):
         try:
-            with pdmlock():
+            with PdmLock():
+                self._update_status()
                 self._assert_pod_address_assigned()
                 self._assert_can_generate_nonce()
                 self._assert_immediate_bolus_not_active()
@@ -182,13 +161,12 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
 
     def cancelBolus(self, beep=False):
         try:
-            with pdmlock():
+            with PdmLock():
                 self._assert_pod_address_assigned()
                 self._assert_can_generate_nonce()
                 self._assert_not_faulted()
@@ -210,12 +188,12 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
     def cancelTempBasal(self, beep=False):
         try:
-            with pdmlock():
+            with PdmLock():
+                self._update_status()
                 self._assert_pod_address_assigned()
                 self._assert_can_generate_nonce()
                 self._assert_immediate_bolus_not_active()
@@ -239,12 +217,12 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
     def setTempBasal(self, basalRate, hours, confidenceReminder=False):
         try:
-            with pdmlock():
+            with PdmLock():
+                self._update_status()
                 self._assert_pod_address_assigned()
                 self._assert_can_generate_nonce()
                 self._assert_immediate_bolus_not_active()
@@ -263,7 +241,7 @@ class Pdm:
                     raise PdmError("Requested rate exceeds maximum temp basal capability")
 
                 if self._is_temp_basal_active():
-                    self.cancelTempBasal()
+                    self._cancelActivity(cancelTempBasal=True, beep=confidenceReminder)
 
                 halfHourUnits = [basalRate / Decimal(2)] * halfHours
                 pulseList = getPulsesForHalfHours(halfHourUnits)
@@ -295,11 +273,11 @@ class Pdm:
 
                 pulseEntries = getPulseIntervalEntries(halfHourUnits)
 
-                firstPulseCount, firstInterval = pulseEntries[0]
+                firstPulseCount, firstInterval, _ = pulseEntries[0]
                 commandBody += struct.pack(">H", firstPulseCount)
                 commandBody += struct.pack(">I", firstInterval)
 
-                for pulseCount, interval in pulseEntries:
+                for pulseCount, interval, _ in pulseEntries:
                     commandBody += struct.pack(">H", pulseCount)
                     commandBody += struct.pack(">I", interval)
 
@@ -320,24 +298,24 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
-    def set_basal_schedule(self, schedule):
+    def set_basal_schedule(self, schedule, hours=None, minutes=None, seconds=None):
         try:
-            with pdmlock():
-                self._assert_pod_address_assigned()
-                self._assert_can_generate_nonce()
-                self._assert_immediate_bolus_not_active()
-                self._assert_not_faulted()
-                self._assert_status_running()
+            with PdmLock():
+                # self._update_status()
+                # self._assert_pod_address_assigned()
+                # self._assert_can_generate_nonce()
+                # self._assert_immediate_bolus_not_active()
+                # self._assert_not_faulted()
+                # self._assert_status_running()
 
-                if self._is_temp_basal_active():
-                    raise PdmError("Cannot change basal schedule while a temp. basal is active")
+                # if self._is_temp_basal_active():
+                #     raise PdmError("Cannot change basal schedule while a temp. basal is active")
 
                 self._assert_basal_schedule_is_valid(schedule)
 
-                self._set_basal_schedule(schedule)
+                self._set_basal_schedule(schedule, hour=hours, minute=minutes, second=seconds)
 
                 if self.pod.state_basal != BasalState.Program:
                     raise PdmError("Failed to set basal schedule")
@@ -349,12 +327,32 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
+            self._savePod()
+
+    def set_basal_schedule_w_cancel(self, schedule, hours=None, minutes=None, seconds=None):
+        try:
+            with PdmLock():
+                self._assert_basal_schedule_is_valid(schedule)
+
+                self._cancelActivity(cancelBasal=True)
+
+                self._set_basal_schedule(schedule, hour=hours, minute=minutes, second=seconds)
+
+                if self.pod.state_basal != BasalState.Program:
+                    raise PdmError("Failed to set basal schedule")
+                else:
+                    self.pod.var_basal_schedule = schedule
+
+        except OmnipyError:
+            raise
+        except Exception as e:
+            raise PdmError("Unexpected error") from e
+        finally:
             self._savePod()
 
     def deactivate_pod(self):
         try:
-            with pdmlock():
+            with PdmLock():
                 msg = self._createMessage(0x1c, bytes([0, 0, 0, 0]))
                 self._sendMessage(msg, with_nonce=True, request_msg="DEACTIVATE POD")
 
@@ -363,30 +361,31 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
-    def activate_pod(self):
+    def activate_pod(self, candidate_address):
         try:
-            with pdmlock():
-
+            return
+            with PdmLock():
                 self._assert_pod_activate_can_start()
 
                 radio = self.get_radio()
                 if radio is None:
                     raise PdmError("Cannot create radio instance")
+
+                candidate_bytes = struct.pack(">I", candidate_address)
+
                 radio.packetSequence = 0
                 radio.messageSequence = 0
                 self.pod.radio_address = 0xffffffff
 
-                address_candidate_bytes = struct.pack(">I", self.pod.radio_address_candidate)
-                msg = self._createMessage(0x07, address_candidate_bytes)
-                self._sendMessage(msg, with_nonce=False, request_msg="ASSIGN ADDRESS 0x%08X" % self.pod.radio_address_candidate,
-                                  stay_connected=True, low_tx=True, resync_allowed=True, address2=self.pod.radio_address_candidate)
+                msg = self._createMessage(0x07, candidate_bytes, )
+                self._sendMessage(msg, with_nonce=False, request_msg="ASSIGN ADDRESS 0x%08X" % candidate_address,
+                                  tx_power=TxPower.Low)
 
                 self._assert_pod_can_activate()
 
-                command_body = address_candidate_bytes
+                command_body = candidate_bytes
                 packet_timeout = 4
                 command_body += bytes([0x14, packet_timeout])
 
@@ -405,13 +404,14 @@ class Pdm:
                 command_body += struct.pack(">I", self.pod.id_t)
 
                 msg = self._createMessage(0x03, command_body)
-                self._sendMessage(msg, with_nonce=False, request_msg="PAIR POD",
-                                  stay_connected=True, low_tx=True, resync_allowed=False,
-                                  address2=self.pod.radio_address_candidate)
+                self._sendMessage(msg, with_nonce=False, request_msg="PAIR POD", tx_power=TxPower.Low)
 
                 self._assert_pod_paired()
+
                 self.pod.nonce_seed = 0
                 self.pod.nonce_last = None
+
+                self.pod.radio_address = candidate_address
 
                 if self.pod.var_alert_low_reservoir is not None:
                     self._configure_alert(PodAlertBit.LowReservoir,
@@ -421,8 +421,7 @@ class Pdm:
                                           trigger_reservoir=True,
                                           alert_after_reservoir=float(self.pod.var_alert_low_reservoir),
                                           beep_repeat_type=BeepPattern.OnceEveryMinuteForThreeMinutesAndRepeatHourly,
-                                          beep_type=BeepType.BipBeepFourTimes,
-                                          stay_connected=True)
+                                          beep_type=BeepType.BipBeepFourTimes)
 
                 self._configure_alert(PodAlertBit.TimerLimit,
                                       activate=True,
@@ -430,10 +429,11 @@ class Pdm:
                                       duration_minutes=55,
                                       alert_after_minutes=5,
                                       beep_repeat_type=BeepPattern.OnceEveryMinuteForThreeMinutesAndRepeatEveryFifteenMinutes,
-                                      beep_type=BeepType.BipBipBipTwice,
-                                      stay_connected=True)
+                                      beep_type=BeepType.BipBipBipTwice)
 
-                self._immediate_bolus(52, stay_connected=True, pulse_speed=8, delivery_delay=1,
+                self._set_delivery_flags(0, 0)
+
+                self._immediate_bolus(52, pulse_speed=8, delivery_delay=1,
                                       request_msg="PRIMING 2.6U")
 
                 time.sleep(55)
@@ -445,14 +445,13 @@ class Pdm:
                                           duration_minutes=0,
                                           alert_after_minutes=int(self.pod.var_alert_replace_pod - self.pod.state_active_minutes),
                                           beep_repeat_type=BeepPattern.OnceEveryMinuteForThreeMinutesAndRepeatEveryFifteenMinutes,
-                                          beep_type=BeepType.BipBeepFourTimes,
-                                          stay_connected=True)
+                                          beep_type=BeepType.BipBeepFourTimes)
                 else:
-                    self._update_status(stay_connected=True)
+                    self._update_status()
 
                 while self.pod.state_progress == PodProgress.Purging:
                     time.sleep(5)
-                    self._update_status(stay_connected=True)
+                    self._update_status()
 
                 if self.pod.state_progress != PodProgress.ReadyForInjection:
                     raise PdmError("Pod did not reach ready for injection stage")
@@ -462,23 +461,25 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
-    def inject_and_start(self):
+    def inject_and_start(self, basal_schedule, hour, minute, second):
         try:
-            with pdmlock():
+            return
+            with PdmLock():
                 if self.pod.state_progress != PodProgress.ReadyForInjection:
                     raise PdmError("Pod is not at the injection stage")
 
-                self._assert_basal_schedule_is_valid(self.pod.var_basal_schedule)
+                self._assert_basal_schedule_is_valid(basal_schedule)
 
-                self._set_basal_schedule(self.pod.var_basal_schedule, stay_connected=True)
+                self._set_basal_schedule(basal_schedule, hour=hour, minute=minute, second=second)
 
                 if self.pod.state_progress != PodProgress.BasalScheduleSet:
                     raise PdmError("Pod did not acknowledge basal schedule")
 
-                self._immediate_bolus(10, stay_connected=True, pulse_speed=8, delivery_delay=1,
+                self._set_delivery_flags(0, 0)
+
+                self._immediate_bolus(10, pulse_speed=8, delivery_delay=1,
                                       request_msg="INSERT CANNULA")
 
                 if self.pod.state_progress != PodProgress.Inserting:
@@ -488,7 +489,7 @@ class Pdm:
 
                 while self.pod.state_progress == PodProgress.Inserting:
                     time.sleep(5)
-                    self._update_status(stay_connected=True)
+                    self._update_status()
 
                 if self.pod.state_progress != PodProgress.Running:
                     raise PdmError("Pod did not get to running state")
@@ -498,11 +499,15 @@ class Pdm:
         except Exception as e:
             raise PdmError("Unexpected error") from e
         finally:
-            self.get_radio().disconnect()
             self._savePod()
 
-    def _immediate_bolus(self, pulse_count, pulse_speed=16, reminders=0, delivery_delay=2, request_msg="",
-                         stay_connected=False):
+    def _set_delivery_flags(self, table5byte16, table5byte17):
+        commandBody = bytes([0, 0, 0, 0, table5byte16, table5byte17])
+        msg = self._createMessage(0x08, commandBody)
+        self._sendMessage(msg, with_nonce=True, request_msg="SET DELIVERY FLAGS %d %d" %
+                                                            (table5byte16, table5byte17))
+
+    def _immediate_bolus(self, pulse_count, pulse_speed=16, reminders=0, delivery_delay=2, request_msg=""):
 
         commandBody = struct.pack(">I", 0)
         commandBody += b"\x02"
@@ -525,8 +530,7 @@ class Pdm:
         commandBody += b"\x00\x00\x00\x00\x00\x00"
         msg.addCommand(0x17, commandBody)
 
-        self._sendMessage(msg, with_nonce=True, request_msg=request_msg,
-                          stay_connected=stay_connected)
+        self._sendMessage(msg, with_nonce=True, request_msg=request_msg)
 
         if self.pod.state_bolus != BolusState.Immediate:
             raise PdmError("Pod did not confirm bolus")
@@ -554,7 +558,7 @@ class Pdm:
         commandBody += bytes([c])
 
         msg = self._createMessage(0x1f, commandBody)
-        self._sendMessage(msg, with_nonce=True, stay_connected=True, request_msg="CANCEL %s" % act_str)
+        self._sendMessage(msg, with_nonce=True, request_msg="CANCEL %s" % act_str)
 
     def _createMessage(self, commandType, commandBody):
         msg = Message(MessageType.PDM, self.pod.radio_address, sequence=self.get_radio().messageSequence)
@@ -579,28 +583,25 @@ class Pdm:
         except Exception as e:
             raise PdmError("Pod status was not saved") from e
 
-    def _sendMessage(self, message, with_nonce=False, nonce_retry_count=0, stay_connected=False, request_msg=None,
-                     resync_allowed=True, low_tx=False, high_tx=False, address2=None):
-        requested_stay_connected = stay_connected
+    def _sendMessage(self, message, with_nonce=False, nonce_retry_count=0, request_msg=None, tx_power=None,
+                     double_take=False):
+
         if with_nonce:
             nonce_obj = self.get_nonce()
             if nonce_obj is None:
                 raise PdmError("Cannot create nonce for message")
             nonce = nonce_obj.getNext()
-            if nonce == FAKE_NONCE:
-                stay_connected = True
             message.setNonce(nonce)
+
+        radio = self.get_radio()
+
         try:
-            response_message = self.get_radio().send_request_get_response(message, stay_connected=stay_connected,
-                                                                    low_tx=low_tx, high_tx=high_tx, address2=address2)
-        except TransmissionOutOfSyncError:
-            if resync_allowed:
-                self._interim_resync()
-                return self._sendMessage(message, with_nonce=with_nonce, nonce_retry_count=nonce_retry_count,
-                                         stay_connected=requested_stay_connected, request_msg=request_msg,
-                                         resync_allowed=False, low_tx=low_tx, high_tx=high_tx, address2=address2)
-            else:
-                raise
+            response_message = radio.send_request_get_response(message, tx_power=tx_power,
+                                                                      double_take=double_take)
+        except:
+            if with_nonce:
+                nonce_obj.reset()
+            raise
 
         contents = response_message.getContents()
         for (ctype, content) in contents:
@@ -617,34 +618,25 @@ class Pdm:
                     elif nonce_retry_count > 3:
                         raise PdmError("Nonce re-negotiation failed")
                     nonce_sync_word = struct.unpack(">H", content[1:])[0]
-                    self.get_nonce().sync(nonce_sync_word, message.sequence)
-                    self.get_radio().messageSequence = message.sequence
+                    nonce_obj.sync(nonce_sync_word, message.sequence)
+                    radio.messageSequence = message.sequence
                     return self._sendMessage(message, with_nonce=True, nonce_retry_count=nonce_retry_count + 1,
-                                             stay_connected=requested_stay_connected, request_msg=request_msg)
+                                             request_msg=request_msg, tx_power=tx_power, double_take=double_take)
 
-    def _interim_resync(self):
-        commandType = 0x0e
-        commandBody = bytes([0])
-        msg = self._createMessage(commandType, commandBody)
-        self._sendMessage(msg, stay_connected=True, request_msg="STATUS REQ %d" % 0,
-                          resync_allowed=True, high_tx=True)
-        time.sleep(10)
-
-    def _update_status(self, update_type=0, stay_connected=True):
+    def _update_status(self, update_type=0):
         commandType = 0x0e
         commandBody = bytes([update_type])
         msg = self._createMessage(commandType, commandBody)
-        self._sendMessage(msg, stay_connected=stay_connected, request_msg="STATUS REQ %d" % update_type)
+        self._sendMessage(msg, request_msg="STATUS REQ %d" % update_type)
 
     def _acknowledge_alerts(self, alert_mask):
         commandType = 0x11
         commandBody = bytes([0, 0, 0, 0, alert_mask])
         msg = self._createMessage(commandType, commandBody)
-        self._sendMessage(msg, with_nonce=True, stay_connected=True, request_msg="ACK 0x%2X " % alert_mask)
+        self._sendMessage(msg, with_nonce=True, request_msg="ACK 0x%2X " % alert_mask)
 
     def _configure_alert(self, alert_bit, activate, trigger_auto_off, duration_minutes, beep_repeat_type, beep_type,
-                     alert_after_minutes=None, alert_after_reservoir=None, trigger_reservoir=False,
-                     stay_connected=False):
+                     alert_after_minutes=None, alert_after_reservoir=None, trigger_reservoir=False):
 
         if alert_after_minutes is None:
             if alert_after_reservoir is None:
@@ -697,10 +689,10 @@ class Pdm:
         commandBody = bytes([0, 0, 0, 0, b0, b1, b2, b3, beep_repeat_type, beep_type])
 
         msg = self._createMessage(commandType, commandBody)
-        self._sendMessage(msg, with_nonce=True, stay_connected=stay_connected,
+        self._sendMessage(msg, with_nonce=True,
                           request_msg="ACTIVATE ALERT %d: %s" %(alert_bit, activate))
 
-    def _set_basal_schedule(self, schedule, stay_connected=False):
+    def _set_basal_schedule(self, schedule, hour=None, minute=None, second=None):
 
         halved_schedule = []
         two = Decimal("2")
@@ -708,12 +700,18 @@ class Pdm:
         for entry in schedule:
             halved_schedule.append(entry / two)
 
+        if self.pod.var_utc_offset is None:
+            self.pod.var_utc_offset = 0
+
         utc_offset = timedelta(minutes=self.pod.var_utc_offset)
         pod_date = datetime.utcnow() + utc_offset
 
-        hour = pod_date.hour
-        minute = pod_date.minute
-        second = pod_date.second
+        if hour is None:
+            hour = pod_date.hour
+        if minute is None:
+            minute = pod_date.minute
+        if second is None:
+            second = pod_date.second
 
         current_hh = hour * 2
         if minute < 30:
@@ -723,6 +721,7 @@ class Pdm:
             current_hh += 1
 
         seconds_past_hh += second
+        seconds_to_hh = 1800 - seconds_past_hh
 
         pulse_list = getPulsesForHalfHours(halved_schedule)
         ise_list = getInsulinScheduleTableFromPulses(pulse_list)
@@ -735,21 +734,10 @@ class Pdm:
         body_checksum = bytes([current_hh])
 
         current_hh_pulse_count = pulse_list[current_hh]
+        remaining_pulse_count = int(current_hh_pulse_count * seconds_to_hh / 1800)
 
-        seconds_past_hh8 = seconds_past_hh * 8
-
-        if current_hh_pulse_count == 0:
-            remaining_pulse_count = 0
-            body_checksum += struct.pack(">H", (1800 * 8) - seconds_past_hh8)
-            body_checksum += struct.pack(">H", 0)
-        else:
-            current_hh_interval_8 = int(1800 * 8 / current_hh_pulse_count)
-            past_pulse_count = int(seconds_past_hh8 / current_hh_interval_8)
-            remaining_pulse_count = current_hh_pulse_count - past_pulse_count
-
-            if remaining_pulse_count > 0:
-                body_checksum += struct.pack(">H", current_hh_interval_8)
-                body_checksum += struct.pack(">H", remaining_pulse_count)
+        body_checksum += struct.pack(">H", seconds_to_hh * 8)
+        body_checksum += struct.pack(">H", remaining_pulse_count)
 
         checksum = getChecksum(body_checksum + pulse_body)
 
@@ -767,12 +755,26 @@ class Pdm:
         command_body = bytes([reminders])
 
         command_body += b"\x00"
+
         pulse_entries = getPulseIntervalEntries(halved_schedule)
+        table_index = 0
+        for pulses10, interval, indices in pulse_entries:
+            if current_hh in indices:
+                command_body += bytes([table_index])
+                ii = indices.index(current_hh)
 
-        command_body += struct.pack(">H", remaining_pulse_count * 10)
-        command_body += struct.pack(">I", (1800 - seconds_past_hh) * 1000 * 1000)
+                pulses_past_intervals = int(ii * 1800000000 / interval)
+                pulses_past_this_interval = int(seconds_past_hh * 1000000 / interval) + 1
+                remaining_pulses_this_interval = pulses10 - pulses_past_this_interval - pulses_past_intervals
+                microseconds_to_next_interval = interval - (seconds_past_hh * 1000000 % interval)
 
-        for pulse_count, interval in pulse_entries:
+                command_body += struct.pack(">H", remaining_pulses_this_interval)
+                command_body += struct.pack(">I", microseconds_to_next_interval)
+                break
+            else:
+                table_index += 1
+
+        for pulse_count, interval, _ in pulse_entries:
             command_body += struct.pack(">H", pulse_count)
             command_body += struct.pack(">I", interval)
 
@@ -783,7 +785,7 @@ class Pdm:
             schedule_str += "%2.2f " % entry
 
         self._sendMessage(msg, with_nonce=True, request_msg="SETBASALSCHEDULE (%s)" % schedule_str,
-                          stay_connected=stay_connected)
+                          double_take=True)
 
     def _is_bolus_running(self):
         if self.pod.state_last_updated is not None and self.pod.state_bolus != BolusState.Immediate:
@@ -836,7 +838,6 @@ class Pdm:
 
     def _assert_pod_activate_can_start(self):
         self._assert_pod_address_not_assigned()
-        self._assert_basal_schedule_is_valid(self.pod.var_basal_schedule)
 
     def _assert_basal_schedule_is_valid(self, schedule):
         if schedule is None:
@@ -854,29 +855,23 @@ class Pdm:
             if entry > max_rate:
                 raise PdmError("A basal rate schedule entry cannot be more than 30U/h")
 
-        if self.pod.var_utc_offset is None:
-            raise PdmError("Pod utc offset not set")
-
     def _assert_pod_address_not_assigned(self):
         if self.pod is None:
             raise PdmError("No pod instance created")
 
-        if self.pod.radio_address is not None:
+        if self.pod.radio_address is not None and self.pod.radio_address != 0xffffffff:
             raise PdmError("Radio radio_address already set")
 
     def _assert_pod_address_assigned(self):
         if self.pod is None:
             raise PdmError("No pod instance created")
 
-        if self.pod.radio_address is None:
+        if self.pod.radio_address is None or self.pod.radio_address == 0xffffffff:
             raise PdmError("Radio radio_address not set")
 
     def _assert_pod_can_activate(self):
         if self.pod is None:
             raise PdmError("No pod instance created")
-
-        if self.pod.radio_address_candidate is None:
-            raise PdmError("Radio radio_address candidate not set")
 
         if self.pod.id_lot is None:
             raise PdmError("Lot number unknown")

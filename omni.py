@@ -43,7 +43,10 @@ def read_pdm_address(args, pa):
 def new_pod(args, pa):
     pa["id_lot"] = args.id_lot
     pa["id_t"] = args.id_t
-    pa["radio_address"] = args.radio_address
+    if str(args.radio_address).lower().startswith("0x"):
+        pa["radio_address"] = int(args.radio_address[2:], 16)
+    else:
+        pa["radio_address"] = int(args.radio_address)
     call_api(args.url, REST_URL_NEW_POD, pa)
 
 
@@ -74,6 +77,19 @@ def deactivate(args, pa):
     call_api(args.url, REST_URL_DEACTIVATE_POD, pa)
 
 
+def activate(args, pa):
+    call_api(args.url, REST_URL_ACTIVATE_POD, pa)
+
+
+def start(args, pa):
+    for i in range(0,48):
+        pa["h" + str(i)] = args.basalrate
+
+    pa["hours"] = 0
+    pa["minutes"] = 0
+    pa["seconds"] = 0
+    call_api(args.url, REST_URL_START_POD, pa)
+
 def shutdown(args, pa):
     call_api(args.url, REST_URL_OMNIPY_SHUTDOWN, pa)
 
@@ -94,7 +110,7 @@ def main():
     subparser = subparsers.add_parser("newpod", help="newpod -h")
     subparser.add_argument("id_lot", type=int, help="Lot number of the pod")
     subparser.add_argument("id_t", type=int, help="Serial number of the pod")
-    subparser.add_argument("radio_address", type=int, help="Radio radio_address of the pod")
+    subparser.add_argument("radio_address", help="Radio radio_address of the pod")
     subparser.set_defaults(func=new_pod)
 
     subparser = subparsers.add_parser("status", help="status -h")
@@ -114,6 +130,13 @@ def main():
 
     subparser = subparsers.add_parser("cancelbolus", help="cancelbolus -h")
     subparser.set_defaults(func=cancel_bolus)
+
+    subparser = subparsers.add_parser("activate", help="activate -h")
+    subparser.set_defaults(func=activate)
+
+    subparser = subparsers.add_parser("start", help="start -h")
+    subparser.add_argument("basalrate", type=str, help="Fixed basal rate in U/h. e.g '0.4' for 0.4U/h")
+    subparser.set_defaults(func=start)
 
     subparser = subparsers.add_parser("deactivate", help="deactivate -h")
     subparser.set_defaults(func=deactivate)

@@ -3,22 +3,18 @@ import os
 import logging
 from logging.handlers import MemoryHandler
 
-TMPFS_ROOT = "/run/user/" + str(os.getuid())
-RILEYLINK_MAC_FILE = TMPFS_ROOT + "/omnipy/rladdr"
-RILEYLINK_VERSION_FILE = TMPFS_ROOT + "/omnipy/rlversion"
-PDM_LOCK_FILE = TMPFS_ROOT + "/omnipy/pdmlock"
-TOKENS_FILE = TMPFS_ROOT + "/omnipy/tokens"
 KEY_FILE = "data/key"
-RESPONSE_FILE = "data/response"
 LAST_ACTIVATED_FILE = "data/lastactivated"
 POD_FILE = "data/pod"
 POD_FILE_SUFFIX = ".json"
 POD_LOG_SUFFIX = ".log"
 OMNIPY_LOGGER = "OMNIPY"
-OMNIPY_LOGFILE = "data/omnipy.log"
+OMNIPY_LOGFILE_PREFIX = "data/omnipy"
+OMNIPY_LOGFILE_SUFFIX = ".log"
+OMNIPY_LOGFILE = OMNIPY_LOGFILE_PREFIX + OMNIPY_LOGFILE_SUFFIX
 
 API_VERSION_MAJOR = 1
-API_VERSION_MINOR = 1
+API_VERSION_MINOR = 3
 
 REST_URL_PING = "/omnipy/ping"
 REST_URL_OMNIPY_SHUTDOWN = "/omnipy/shutdown"
@@ -43,6 +39,7 @@ REST_URL_BOLUS = "/pdm/bolus"
 REST_URL_CANCEL_BOLUS = "/pdm/cancelbolus"
 REST_URL_SET_TEMP_BASAL = "/pdm/settempbasal"
 REST_URL_CANCEL_TEMP_BASAL = "/pdm/canceltempbasal"
+REST_URL_SET_BASAL_SCHEDULE = "/pdm/setbasalschedule"
 
 logger = None
 

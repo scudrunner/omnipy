@@ -1,4 +1,3 @@
-from podcomm.message import Message, MessageType
 from podcomm.protocol_common import *
 from podcomm.definitions import *
 from enum import IntEnum
@@ -10,13 +9,12 @@ class StatusRequestType(IntEnum):
     Standard = 0
 
 
-def request_start_pairing(address):
-    cmd_type = 0x07
+def request_assign_address(address):
     cmd_body = struct.pack(">I", address)
-    return Message(MessageType.PDM, cmd_type, cmd_body)
+    return PdmMessage(PdmRequest.AssignAddress, cmd_body)
 
 
-def request_confirm_pairing(lot, tid, address, utc_offset_minutes):
+def request_setup_pod(lot, tid, address, utc_offset_minutes):
     cmd_body = struct.pack(">I", address)
     cmd_body += bytes([0x14, 0x04])
 
@@ -32,19 +30,18 @@ def request_confirm_pairing(lot, tid, address, utc_offset_minutes):
 
     cmd_body += struct.pack(">I", lot)
     cmd_body += struct.pack(">I", tid)
-    return Message(MessageType.PDM, 0x03, cmd_body)
+    return PdmMessage(PdmRequest.SetupPod, cmd_body)
 
 
 def request_set_low_reservoir_alert(iu_reservoir_level):
-    cmd_body = bytes([0, 0, 0, 0])
-    cmd_body += alert_configuration_message_body(PodAlertBit.LowReservoir,
+    cmd_body = alert_configuration_message_body(PodAlertBit.LowReservoir,
                                                  activate=True,
                                                  trigger_auto_off=False,
                                                  duration_minutes=60,
                                                  alert_after_reservoir=iu_reservoir_level,
                                                  beep_type=BeepType.BipBip,
                                                  beep_repeat_type=BeepPattern.OnceEveryHour)
-    return Message(MessageType.PDM, 0x19, cmd_body)
+    return PdmMessage(PdmRequest.ConfigureAlerts, cmd_body)
 
 
 def request_clear_low_reservoir_alert():
@@ -52,7 +49,14 @@ def request_clear_low_reservoir_alert():
 
 
 def request_set_pod_expiry_alert(minutes_after_activation):
-    pass
+    cmd_body = alert_configuration_message_body(PodAlertBit.LowReservoir,
+                                                 activate=True,
+                                                 trigger_auto_off=False,
+                                                 duration_minutes=60,
+                                                 alert_after_minutes=minutes_after_activation,
+                                                 beep_type=BeepType.BipBip,
+                                                 beep_repeat_type=BeepPattern.OnceEveryHour)
+    return PdmMessage(PdmRequest.ConfigureAlerts, cmd_body)
 
 
 def request_clear_pod_expiry_alert():
@@ -60,15 +64,14 @@ def request_clear_pod_expiry_alert():
 
 
 def request_set_generic_alert(minutes_after_set, repeat_interval):
-    cmd_body = bytes([0, 0, 0, 0])
-    cmd_body += alert_configuration_message_body(PodAlertBit.TimerLimit,
+    cmd_body = alert_configuration_message_body(PodAlertBit.TimerLimit,
                                                  activate=True,
                                                  trigger_auto_off=False,
                                                  duration_minutes=55,
                                                  alert_after_minutes=5,
                                                  beep_repeat_type=BeepPattern.OnceEveryMinuteForThreeMinutesAndRepeatEveryFifteenMinutes,
                                                  beep_type=BeepType.BipBipBipTwice)
-    return Message(MessageType.PDM, 0x19, cmd_body)
+    return PdmMessage(PdmRequest.ConfigureAlerts, cmd_body)
 
 
 def request_clear_generic_alert():
@@ -88,15 +91,13 @@ def request_insert_cannula():
 
 
 def request_status(status_request_type=0):
-    cmd_type = 0x0e
     cmd_body = bytes([status_request_type])
-    return Message(MessageType.PDM, cmd_type, cmd_body)
+    return PdmMessage(PdmRequest.Status, cmd_body)
 
 
 def request_acknowledge_alerts(alert_mask):
-    cmd_type = 0x11
-    cmd_body = bytes([0, 0, 0, 0, alert_mask])
-    return Message(MessageType.PDM, cmd_type, cmd_body)
+    cmd_body = bytes([alert_mask])
+    return PdmMessage(PdmRequest.AcknowledgeAlerts, cmd_body)
 
 
 def request_purge_insulin(iu_to_purge):

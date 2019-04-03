@@ -17,7 +17,6 @@ class Pod:
         self.id_version_unknown_7_bytes = None
 
         self.radio_address = None
-        self.radio_address_candidate = None
         self.radio_packet_sequence = 0
         self.radio_message_sequence = 0
         self.radio_low_gain = None
@@ -98,7 +97,6 @@ class Pod:
             p.id_version_unknown_7_bytes = d["id_version_unknown_7_bytes"]
 
             p.radio_address = d["radio_address"]
-            p.radio_address_candidate = d["radio_address_candidate"]
             p.radio_packet_sequence = d["radio_packet_sequence"]
             p.radio_message_sequence = d["radio_message_sequence"]
             p.radio_low_gain = d["radio_low_gain"]
@@ -176,10 +174,7 @@ class Pod:
         self.id_lot = struct.unpack(">I", message_body[8:12])[0]
         self.id_t = struct.unpack(">I", message_body[12:16])[0]
         address = struct.unpack(">I", message_body[16:20])[0]
-        if candidate_only:
-            self.radio_address_candidate = address
-        else:
-            self.radio_address = address
+        self.radio_address = address
 
     def handle_information_response(self, response, original_request=None):
         if response[0] == 0x01:
@@ -256,6 +251,7 @@ class Pod:
 
         self.Save()
 
+### TODO: needs improving for nonetype crashes etc
         self.log("%d\t%s\t%s\t%f\t%f\t%d\t%s\t%s\t%s\t%d\t%s\t%s\t%d\t%d\t0x%8X\n" % \
                  (self.state_last_updated, ds, orq, self.insulin_delivered, self.insulin_canceled, self.state_active_minutes,
                   PodProgress(self.state_progress).name,
